@@ -1,0 +1,12 @@
+name: ggs
+channels:
+  - pytorch
+  - nvidia         # optional; ignored on CPU-only
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - pillow
+  - pip
+  - pytorch::pytorch
+  - pytorch-cuda=12.1
