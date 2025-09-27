@@ -1,30 +1,24 @@
-# src/ggs/render.py
 from __future__ import annotations
 import torch
 
-# Prefer GPU if available; falls back to CPU.
 _DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 __all__ = [
     "render_splats_rgb",
-    "_render_single_into",    # kept public for your step-by-step tests
+    "_render_single_into_beer",   # exposed for step-by-step tests
     "_DEV",
 ]
 
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
 
 def _build_L_from_logs(a_log: torch.Tensor, b_log: torch.Tensor, c_raw: torch.Tensor, dev) -> torch.Tensor:
     """
-    Construct lower-triangular Cholesky L in *pixel units* from
-      a_log, b_log (diagonal logs) and c_raw (signed shear):
+    Construct lower-triangular Cholesky L in pixel units from
+    a_log, b_log (diagonal logs) and c_raw (signed shear):
         L = [[exp(a_log), 0],
-             [c_raw,      exp(b_log)]]
+                [c_raw,      exp(b_log)]]
     """
     l11 = torch.exp(a_log)
     l22 = torch.exp(b_log)
-    # tiny floors to avoid degeneracy
     eps = torch.tensor(1e-12, device=dev)
     l11 = torch.clamp(l11, min=eps)
     l22 = torch.clamp(l22, min=eps)
@@ -63,14 +57,10 @@ def _quadform_via_tri(qx: torch.Tensor, qy: torch.Tensor,
     return y1 * y1 + y2 * y2
 
 
-# ------------------------------------------------------------
-# Core: render one splat into premultiplied buffers
-# ------------------------------------------------------------
-
 @torch.no_grad()
-def _render_single_into(
-    img_C: torch.Tensor,  # [H,W,3], premultiplied color buffer (in-place)
-    img_A: torch.Tensor,  # [H,W,1], alpha buffer (in-place)
+def _render_single_into_beer(
+    C_lin: torch.Tensor,  # [H,W,3]  accumulates color *densities*
+    A_lin: torch.Tensor,  # [H,W,1]  accumulates alpha  *densities*
     indiv: torch.Tensor,  # [9] = [x, y, a_log, b_log, c_raw, r, g, b, alpha]
     H: int,
     W: int,
@@ -78,7 +68,7 @@ def _render_single_into(
     dev: torch.device,
 ) -> None:
     """
-    OVER-composite a single Gaussian splat into (img_C, img_A), both premultiplied.
+    Add one splat's densities into (C_lin, A_lin) using Beer-Lambert model.
 
     Genome row layout:
       [x, y, a_log, b_log, c_raw, r, g, b, alpha]
@@ -90,7 +80,7 @@ def _render_single_into(
     """
     x, y, a_log, b_log, c_raw, rc, gc, bc, a = indiv.to(dev, dtype=torch.float32)
 
-    # Clamp only display ranges
+    # Clamp display ranges
     a  = torch.clamp(a,  0.0, 1.0)
     rc = torch.clamp(rc, 0.0, 255.0)
     gc = torch.clamp(gc, 0.0, 255.0)
@@ -116,57 +106,56 @@ def _render_single_into(
     xs = torch.arange(x0, x1 + 1, device=dev, dtype=torch.float32)
     ys = torch.arange(y0, y1 + 1, device=dev, dtype=torch.float32)
     X, Y = torch.meshgrid(xs, ys, indexing='xy')
-    qx = X - cx
+    qx = X - cx  # local coords
     qy = Y - cy
 
     # Quadratic form and Gaussian value
-    l11 = L[0, 0]
-    l21 = L[1, 0]
-    l22 = L[1, 1]
-    quad = _quadform_via_tri(qx, qy, l11, l21, l22)  # [h,w]
-    val = torch.exp(-0.5 * quad)                      # [h,w]
+    l11 = L[0, 0]; l21 = L[1, 0]; l22 = L[1, 1]
+    quad = _quadform_via_tri(qx, qy, l11, l21, l22)    # [h,w]
+    val  = torch.exp(-0.5 * quad)                      # [h,w]
 
-    # Premultiplied contribution
-    alpha_pix = (a * val)[..., None]                  # [h,w,1]
-    rgb = torch.stack((rc, gc, bc)) / 255.0           # [3]
-    C_add = alpha_pix * rgb                           # [h,w,3]
+    # Per-pixel densities
+    alpha_pix = (a * val)[..., None]                   # [h,w,1]
+    rgb_unit  = torch.stack((rc, gc, bc)) / 255.0      # [3]
+    C_add     = alpha_pix * rgb_unit                   # [h,w,3]
 
-    # OVER-composite into the big buffers
-    A_in = img_A[y0:y1+1, x0:x1+1, :]                 # [h,w,1]
-    one_minus = 1.0 - A_in
-    img_C[y0:y1+1, x0:x1+1, :] = img_C[y0:y1+1, x0:x1+1, :] + C_add * one_minus
-    img_A[y0:y1+1, x0:x1+1, :] = A_in + alpha_pix * one_minus
+    # Order-independent accumulation (just sums of densities)
+    C_lin[y0:y1+1, x0:x1+1, :] += C_add
+    A_lin[y0:y1+1, x0:x1+1, :] += alpha_pix
 
-
-# ------------------------------------------------------------
-# Public: render N splats and return straight RGB [0,1]
-# ------------------------------------------------------------
 
 @torch.no_grad()
-def render_splats_rgb(genome, H, W, *, k_sigma=3.0, device=None, unpremultiply=False, bg=None):
+def render_splats_rgb(
+    genome: torch.Tensor,   # [N,9] or [9]
+    H: int,
+    W: int,
+    *,
+    k_sigma: float = 3.0,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """
+    Beer–Lambert renderer over a black background.
+
+    Accumulate densities:
+        C_lin = sum_i alpha_i * color_i * N_i      # [H,W,3]
+        A_lin = sum_i alpha_i * N_i                # [H,W,1] (unused for black bg)
+
+    Map to display over black:
+        rgb = 1 - exp(-C_lin)
+
+    Returns: rgb in [0,1], shape [H,W,3] on CPU.
+    """
     dev = device or _DEV
-    img_C = torch.zeros((H, W, 3), device=dev, dtype=torch.float32)
-    img_A = torch.zeros((H, W, 1), device=dev, dtype=torch.float32)
+    C_lin = torch.zeros((H, W, 3), device=dev, dtype=torch.float32)
+    A_lin = torch.zeros((H, W, 1), device=dev, dtype=torch.float32)  # still needed for splat rendering
 
     if genome.ndim == 1:
         genome = genome.unsqueeze(0)
 
     for i in range(genome.shape[0]):
-        _render_single_into(img_C, img_A, genome[i], H, W, k_sigma, dev)
+        _render_single_into_beer(C_lin, A_lin, genome[i], H, W, k_sigma, dev)
 
-    if bg is not None:
-        # composite over background (bg can be [3] or [H,W,3])
-        if isinstance(bg, torch.Tensor):
-            B = bg.to(dev).reshape(1, 1, 3).expand(H, W, 3)
-        else:
-            # tuple like (1,1,1) for white
-            B = torch.tensor(bg, device=dev, dtype=torch.float32).reshape(1,1,3).expand(H,W,3)
-        rgb = img_C + (1.0 - img_A) * B
-    elif unpremultiply:
-        eps = 1e-8
-        rgb = torch.where(img_A > eps, img_C / img_A, img_C)
-    else:
-        rgb = img_C  # best for preview on black
+    # Beer–Lambert mapping over black
+    rgb = 1.0 - torch.exp(-C_lin)
 
-    return rgb.clamp(0, 1).cpu()
-
+    return rgb.clamp(0.0, 1.0).cpu()
