@@ -5,8 +5,8 @@ import torch
 _DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 __all__ = [
-    "render_splats_rgb",
-    "_render_single_into_beer",
+    "render_splats_rgb",           # NEW: weighted-average color blending
+    "_render_single_into_avg",
     "_DEV",
 ]
 
@@ -16,7 +16,7 @@ def _build_L_from_logs(a_log: torch.Tensor, b_log: torch.Tensor, c_raw: torch.Te
     Construct lower-triangular Cholesky L in pixel units from
     a_log, b_log (diagonal logs) and c_raw (signed shear):
         L = [[exp(a_log), 0],
-                [c_raw,      exp(b_log)]]
+             [c_raw,      exp(b_log)]]
     """
     l11 = torch.exp(a_log)
     l22 = torch.exp(b_log)
@@ -59,9 +59,9 @@ def _quadform_via_tri(qx: torch.Tensor, qy: torch.Tensor,
 
 
 @torch.no_grad()
-def _render_single_into_beer(
-    C_lin: torch.Tensor,  # [H,W,3]  accumulates color *densities*
-    A_lin: torch.Tensor,  # [H,W,1]  accumulates alpha  *densities*
+def _render_single_into_avg(
+    C_num: torch.Tensor,  # [H,W,3] accumulates sum(w * color)
+    W_sum: torch.Tensor,  # [H,W,1] accumulates sum(w)
     indiv: torch.Tensor,  # [9] = [x, y, a_log, b_log, c_raw, r, g, b, alpha]
     H: int,
     W: int,
@@ -69,7 +69,7 @@ def _render_single_into_beer(
     dev: torch.device,
 ) -> None:
     """
-    Add one splat's densities into (C_lin, A_lin) using Beer-Lambert model.
+    Add one splat using order-independent weighted-average blending.
 
     Genome row layout:
       [x, y, a_log, b_log, c_raw, r, g, b, alpha]
@@ -81,7 +81,7 @@ def _render_single_into_beer(
     """
     x, y, a_log, b_log, c_raw, rc, gc, bc, a = indiv.to(dev, dtype=torch.float32)
 
-    # Clamp display ranges
+    # Clamp input ranges
     a  = torch.clamp(a,  0.0, 1.0)
     rc = torch.clamp(rc, 0.0, 255.0)
     gc = torch.clamp(gc, 0.0, 255.0)
@@ -91,7 +91,7 @@ def _render_single_into_beer(
     cx = torch.clamp(x, 0.0, 1.0) * (W - 1)
     cy = torch.clamp(y, 0.0, 1.0) * (H - 1)
 
-    # Geometry from logs
+    # Geometry
     L = _build_L_from_logs(a_log, b_log, c_raw, dev)
     hx, hy = _aabb_from_L(L, k_sigma)
 
@@ -103,26 +103,26 @@ def _render_single_into_beer(
     if x1 <= x0 or y1 <= y0:
         return  # off-screen / degenerate
 
-    # Local pixel grid
+    # Local grid
     xs = torch.arange(x0, x1 + 1, device=dev, dtype=torch.float32)
     ys = torch.arange(y0, y1 + 1, device=dev, dtype=torch.float32)
     X, Y = torch.meshgrid(xs, ys, indexing='xy')
-    qx = X - cx  # local coords
+    qx = X - cx
     qy = Y - cy
 
-    # Quadratic form and Gaussian value
+    # Gaussian weight (radially symmetric in Σ metric)
     l11 = L[0, 0]; l21 = L[1, 0]; l22 = L[1, 1]
     quad = _quadform_via_tri(qx, qy, l11, l21, l22)    # [h,w]
     val  = torch.exp(-0.5 * quad)                      # [h,w]
 
-    # Per-pixel densities
-    alpha_pix = (a * val)[..., None]                   # [h,w,1]
-    rgb_unit  = torch.stack((rc, gc, bc)) / 255.0      # [3]
-    C_add     = alpha_pix * rgb_unit                   # [h,w,3]
+    # Per-pixel weight and color
+    w = (a * val)[..., None]                           # [h,w,1]
+    rgb_unit = torch.stack((rc, gc, bc)) / 255.0       # [3]
+    C_add = w * rgb_unit                               # [h,w,3]
 
-    # Order-independent accumulation
-    C_lin[y0:y1+1, x0:x1+1, :] += C_add
-    A_lin[y0:y1+1, x0:x1+1, :] += alpha_pix
+    # Accumulate
+    C_num[y0:y1+1, x0:x1+1, :] += C_add
+    W_sum[y0:y1+1, x0:x1+1, :] += w
 
 
 @torch.no_grad()
@@ -133,30 +133,40 @@ def render_splats_rgb(
     *,
     k_sigma: float = 3.0,
     device: torch.device | None = None,
+    background: tuple[float, float, float] | None = (0.0, 0.0, 0.0),
+    eps: float = 1e-8,
 ) -> torch.Tensor:
     """
-    Beer–Lambert renderer over a black background.
+    Order-independent weighted-average renderer (no Beer–Lambert).
 
-    Accumulate densities:
-        C_lin = sum_i alpha_i * color_i * N_i      # [H,W,3]
-        A_lin = sum_i alpha_i * N_i                # [H,W,1] (unused for black bg)
+    Accumulate:
+        C_num = Σ_i ( w_i * color_i )      # [H,W,3]
+        W_sum = Σ_i ( w_i )                # [H,W,1]
+      where w_i = alpha_i * N_i
 
-    Map to display over black:
-        rgb = 1 - exp(-C_lin)
+    Final display (with optional background color in [0,1]):
+        if W_sum > 0:    rgb = C_num / (W_sum + eps)
+        else:            rgb = background
 
     Returns: rgb in [0,1], shape [H,W,3] on CPU.
     """
     dev = device or _DEV
-    C_lin = torch.zeros((H, W, 3), device=dev, dtype=torch.float32)
-    A_lin = torch.zeros((H, W, 1), device=dev, dtype=torch.float32)  # still needed for splat rendering
+    C_num = torch.zeros((H, W, 3), device=dev, dtype=torch.float32)
+    W_sum = torch.zeros((H, W, 1), device=dev, dtype=torch.float32)
 
     if genome.ndim == 1:
         genome = genome.unsqueeze(0)
 
     for i in range(genome.shape[0]):
-        _render_single_into_beer(C_lin, A_lin, genome[i], H, W, k_sigma, dev)
+        _render_single_into_avg(C_num, W_sum, genome[i], H, W, k_sigma, dev)
 
-    # Beer–Lambert mapping over black
-    rgb = 1.0 - torch.exp(-C_lin)
+    # Normalize
+    rgb = C_num / (W_sum + eps)
+
+    # Optional background where there is no coverage
+    if background is not None:
+        bg = torch.tensor(background, device=dev, dtype=torch.float32).view(1, 1, 3)
+        mask = (W_sum <= eps)  # [H,W,1] boolean
+        rgb = torch.where(mask.expand_as(rgb), bg.expand_as(rgb), rgb)
 
     return rgb.clamp(0.0, 1.0).cpu()
