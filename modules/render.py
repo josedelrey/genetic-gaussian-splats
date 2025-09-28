@@ -5,8 +5,8 @@ import torch
 _DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 __all__ = [
-    "render_splats_rgb",           # NEW: weighted-average color blending
-    "_render_single_into_avg",
+    "render_splats_rgb",           # order-dependent OVER compositing (no alpha)
+    "_render_single_into_over",
     "_DEV",
 ]
 
@@ -59,30 +59,22 @@ def _quadform_via_tri(qx: torch.Tensor, qy: torch.Tensor,
 
 
 @torch.no_grad()
-def _render_single_into_avg(
-    C_num: torch.Tensor,  # [H,W,3] accumulates sum(w * color)
-    W_sum: torch.Tensor,  # [H,W,1] accumulates sum(w)
-    indiv: torch.Tensor,  # [9] = [x, y, a_log, b_log, c_raw, r, g, b, alpha]
+def _render_single_into_over(
+    C_img: torch.Tensor,   # [H,W,3] in-place image (0..1)
+    indiv: torch.Tensor,   # [8] = [x, y, a_log, b_log, c_raw, r, g, b]
     H: int,
     W: int,
     k_sigma: float,
     dev: torch.device,
 ) -> None:
     """
-    Add one splat using order-independent weighted-average blending.
-
-    Genome row layout:
-      [x, y, a_log, b_log, c_raw, r, g, b, alpha]
-        - x, y in [0,1] (normalized coords, origin top-left)
-        - a_log, b_log are logs of *pixel* scales (diagonal of L)
-        - c_raw is signed shear in pixels (off-diagonal)
-        - r, g, b in [0,255]
-        - alpha in [0,1]
+    Order-dependent OVER compositing per splat (no alpha):
+      f = Gaussian(x) in [0,1]
+      C <- (1 - f) * C + f * color
     """
-    x, y, a_log, b_log, c_raw, rc, gc, bc, a = indiv.to(dev, dtype=torch.float32)
+    x, y, a_log, b_log, c_raw, rc, gc, bc = indiv.to(dev, dtype=torch.float32)
 
-    # Clamp input ranges
-    a  = torch.clamp(a,  0.0, 1.0)
+    # Clamp colors
     rc = torch.clamp(rc, 0.0, 255.0)
     gc = torch.clamp(gc, 0.0, 255.0)
     bc = torch.clamp(bc, 0.0, 255.0)
@@ -110,63 +102,47 @@ def _render_single_into_avg(
     qx = X - cx
     qy = Y - cy
 
-    # Gaussian weight (radially symmetric in Σ metric)
+    # Gaussian weight in Σ metric
     l11 = L[0, 0]; l21 = L[1, 0]; l22 = L[1, 1]
-    quad = _quadform_via_tri(qx, qy, l11, l21, l22)    # [h,w]
-    val  = torch.exp(-0.5 * quad)                      # [h,w]
+    quad = _quadform_via_tri(qx, qy, l11, l21, l22)   # [h,w]
+    val  = torch.exp(-0.5 * quad)                     # [h,w]
 
-    # Per-pixel weight and color
-    w = (a * val)[..., None]                           # [h,w,1]
-    rgb_unit = torch.stack((rc, gc, bc)) / 255.0       # [3]
-    C_add = w * rgb_unit                               # [h,w,3]
+    # Blend factor and color
+    f = val[..., None]                                # [h,w,1], no alpha
+    color = torch.stack((rc, gc, bc)) / 255.0         # [3]
 
-    # Accumulate
-    C_num[y0:y1+1, x0:x1+1, :] += C_add
-    W_sum[y0:y1+1, x0:x1+1, :] += w
+    # OVER compositing: C = (1 - f) * C + f * color
+    region = C_img[y0:y1+1, x0:x1+1, :]
+    C_img[y0:y1+1, x0:x1+1, :] = region * (1.0 - f) + f * color
 
 
 @torch.no_grad()
 def render_splats_rgb(
-    genome: torch.Tensor,  # [N,9] or [9]
+    genome: torch.Tensor,  # [N,8] or [8]
     H: int,
     W: int,
     *,
     k_sigma: float = 3.0,
     device: torch.device | None = None,
-    background: tuple[float, float, float] | None = (0.0, 0.0, 0.0),
-    eps: float = 1e-8,
+    background: tuple[float, float, float] = (1.0, 1.0, 1.0),  # white
 ) -> torch.Tensor:
     """
-    Order-independent weighted-average renderer (no Beer–Lambert).
-
-    Accumulate:
-        C_num = Σ_i ( w_i * color_i )      # [H,W,3]
-        W_sum = Σ_i ( w_i )                # [H,W,1]
-      where w_i = alpha_i * N_i
-
-    Final display (with optional background color in [0,1]):
-        if W_sum > 0:    rgb = C_num / (W_sum + eps)
-        else:            rgb = background
-
+    Order-dependent OVER renderer (shader-style, no alpha):
+        For each splat (in given order):
+            f = Gaussian
+            C <- (1 - f) * C + f * color
     Returns: rgb in [0,1], shape [H,W,3] on CPU.
     """
     dev = device or _DEV
-    C_num = torch.zeros((H, W, 3), device=dev, dtype=torch.float32)
-    W_sum = torch.zeros((H, W, 1), device=dev, dtype=torch.float32)
+
+    # Init image to background
+    C_img = torch.tensor(background, device=dev, dtype=torch.float32).view(1, 1, 3)
+    C_img = C_img.expand(H, W, 3).clone()
 
     if genome.ndim == 1:
         genome = genome.unsqueeze(0)
 
     for i in range(genome.shape[0]):
-        _render_single_into_avg(C_num, W_sum, genome[i], H, W, k_sigma, dev)
+        _render_single_into_over(C_img, genome[i], H, W, k_sigma, dev)
 
-    # Normalize
-    rgb = C_num / (W_sum + eps)
-
-    # Optional background where there is no coverage
-    if background is not None:
-        bg = torch.tensor(background, device=dev, dtype=torch.float32).view(1, 1, 3)
-        mask = (W_sum <= eps)  # [H,W,1] boolean
-        rgb = torch.where(mask.expand_as(rgb), bg.expand_as(rgb), rgb)
-
-    return rgb.clamp(0.0, 1.0).cpu()
+    return C_img.clamp(0.0, 1.0).cpu()

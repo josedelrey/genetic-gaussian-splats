@@ -34,20 +34,37 @@ def axes_angle_to_cholesky(a_log: torch.Tensor, b_log: torch.Tensor, theta: torc
 @torch.no_grad()
 def genome_to_renderer(ind_axes_angle: torch.Tensor) -> torch.Tensor:
     """
-    Convert a genome with theta (shape [N,9]) to renderer format [N,9]:
-      [x,y,a_log,b_log,theta,r,g,b,alpha] -> [x,y,a_log_eff,b_log_eff,c_raw_eff,r,g,b,alpha]
-    """
-    out = torch.empty((ind_axes_angle.shape[0], 9), device=ind_axes_angle.device, dtype=ind_axes_angle.dtype)
-    # Copy x,y and colors, alpha
-    out[:, 0:2] = ind_axes_angle[:, 0:2]
-    out[:, 5:8] = ind_axes_angle[:, 5:8]
-    out[:, 8]   = ind_axes_angle[:, 8]   # <-- alpha comes from col 8
+    Convert a genome with theta to renderer format, **without alpha**.
 
-    # Convert (a_log,b_log,theta) -> (a_log_eff,b_log_eff,c_raw_eff)
+    Input (new, preferred): [N,8]
+        [x, y, a_log, b_log, theta, r, g, b]
+
+    Also accepts legacy [N,9] with a trailing alpha column; alpha is ignored.
+
+    Output (renderer format): [N,8]
+        [x, y, a_log_eff, b_log_eff, c_raw_eff, r, g, b]
+    """
+    if ind_axes_angle.ndim == 1:
+        ind_axes_angle = ind_axes_angle.unsqueeze(0)
+
+    N, C = ind_axes_angle.shape
+    if C < 8:
+        raise ValueError(f"genome_to_renderer expects at least 8 columns, got {C}")
+
+    out = torch.empty((N, 8), device=ind_axes_angle.device, dtype=ind_axes_angle.dtype)
+
+    # Copy x, y and colors
+    out[:, 0:2] = ind_axes_angle[:, 0:2]      # x, y
+    out[:, 5:8] = ind_axes_angle[:, 5:8]      # r, g, b
+
+    # Convert (a_log, b_log, theta) -> (a_log_eff, b_log_eff, c_raw_eff)
     a_log_eff, b_log_eff, c_raw_eff = axes_angle_to_cholesky(
-        ind_axes_angle[:, 2], ind_axes_angle[:, 3], ind_axes_angle[:, 4]
+        ind_axes_angle[:, 2],  # a_log
+        ind_axes_angle[:, 3],  # b_log
+        ind_axes_angle[:, 4],  # theta
     )
     out[:, 2] = a_log_eff
     out[:, 3] = b_log_eff
     out[:, 4] = c_raw_eff
+
     return out
