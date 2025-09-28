@@ -94,7 +94,7 @@ def _render_single_into_beer(
     L = _build_L_from_logs(a_log, b_log, c_raw, dev)
     hx, hy = _aabb_from_L(L, k_sigma)
 
-    # Crop (inclusive indices)
+    # Crop
     x0 = int(torch.clamp(cx - hx, 0, W - 1).item())
     x1 = int(torch.clamp(cx + hx, 0, W - 1).item())
     y0 = int(torch.clamp(cy - hy, 0, H - 1).item())
@@ -119,14 +119,14 @@ def _render_single_into_beer(
     rgb_unit  = torch.stack((rc, gc, bc)) / 255.0      # [3]
     C_add     = alpha_pix * rgb_unit                   # [h,w,3]
 
-    # Order-independent accumulation (just sums of densities)
+    # Order-independent accumulation
     C_lin[y0:y1+1, x0:x1+1, :] += C_add
     A_lin[y0:y1+1, x0:x1+1, :] += alpha_pix
 
 
 @torch.no_grad()
 def render_splats_rgb(
-    genome: torch.Tensor,   # [N,9] or [9]
+    genome: torch.Tensor,  # [N,9] or [9]
     H: int,
     W: int,
     *,
