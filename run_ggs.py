@@ -18,44 +18,42 @@ INPUT_DIR    = "imgs"
 OUTPUT_DIR   = "output"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# --- NEW video controls ---
+SAVE_VIDEO   = True          # set False to disable saving frames
+FRAME_EVERY  = 10            # save a frame every N generations (also saves gen 0)
+
+# NEW: where video frames will be written (created only if saving)
+VIDEO_DIR    = os.path.join(OUTPUT_DIR, "video_frames")
+if SAVE_VIDEO:
+    os.makedirs(VIDEO_DIR, exist_ok=True)
+
 H, W          = 128, 128          # initial placeholder (overwritten by choose_work_size)
-WORK_MAX_SIDE = 64                # working resolution max side for GA
-N_SPLATS      = 256
-POP_SIZE      = 32
-GENERATIONS   = 1000
+WORK_MAX_SIDE = 512               # working resolution max side for GA
+N_SPLATS      = 512
+POP_SIZE      = 5
+GENERATIONS   = 10000
 TOUR_K        = 2
 ELITE_K       = max(1, POP_SIZE // 10)   # keep at least 1 elite
 CXPB          = 0.7
 
 # Mutation probabilities
-MUTPB_NON_ELITE  = 0.2          # per-gene mutation probability for non-elites
-MUTPB_ELITE      = 0.3          # per-gene mutation probability for elites
-ELITE_MUT_FRAC   = 0.9          # 0..1; e.g., 0.9 means mutate 90% of elites
-PROTECT_BEST_ELITE = True       # do not mutate the overall best individual
-ELITE_SIGMA_MULT = 0.7          # elites get smaller mutation steps (polish)
+MUTPB_NON_ELITE  = 0.05
+MUTPB_ELITE      = 0.04
+ELITE_MUT_FRAC   = 0.9
+PROTECT_BEST_ELITE = True
+ELITE_SIGMA_MULT = 0.7
+SWAP_ORDER_P = 0.7  # probability of a single order swap mutation
 
 K_SIGMA       = 3.0
-SEED          = 42              # set to None for non-deterministic runs
+SEED          = 42
 
 # Genome clamping (sizes are in pixels before logging)
-MIN_SCALE_SPLATS = 1.0            # min radius in pixels
+MIN_SCALE_SPLATS = 1.0
 MAX_SCALE_SPLATS = 0.10           # max radius relative to max(H,W)
 
 # -------- Annealed mutation SIGMA ranges (MAX -> MIN over time) --------
-MUT_SIGMA_MAX = {
-    "xy":    0.06,   # normalized coords (start broader)
-    "alog":  0.40,   # logs in pixel units
-    "blog":  0.40,
-    "theta": 0.70,   # radians
-    "rgb":   30.0,   # 0..255
-}
-MUT_SIGMA_MIN = {
-    "xy":    0.01,
-    "alog":  0.06,
-    "blog":  0.06,
-    "theta": 0.03,
-    "rgb":   4.0,
-}
+MUT_SIGMA_MAX = {"xy":0.12,"alog":0.70,"blog":0.70,"theta":0.70,"rgb":40.0}
+MUT_SIGMA_MIN = {"xy":0.01,"alog":0.06,"blog":0.06,"theta":0.03,"rgb":4.0}
 
 # Reproducibility
 if SEED is not None:
@@ -68,20 +66,13 @@ if SEED is not None:
 # Annealing utilities
 # ============================================================
 def _anneal_factor(gen:int, total_gens:int, kind:str="cosine") -> float:
-    """
-    Factor in [0,1], where 1.0 at gen=0 and ~0.0 at gen=total_gens.
-    Schedules: 'linear' | 'cosine' | 'exp'
-    """
     g = max(0, min(gen, total_gens))
     p = g / max(1, total_gens)
-
     if kind == "linear":
         f = 1.0 - p
     elif kind == "cosine":
-        # Smooth start & end, keeps exploration a bit longer
         f = 0.5 * (1.0 + math.cos(math.pi * p))
     elif kind == "exp":
-        # Pick a target floor at the end (e.g., 0.05)
         target = 0.05
         decay = target ** (1.0 / max(1, total_gens))
         f = decay ** g
@@ -90,74 +81,81 @@ def _anneal_factor(gen:int, total_gens:int, kind:str="cosine") -> float:
     return max(0.0, min(1.0, f))
 
 def build_mut_sigma(gen:int, total_gens:int, kind:str="cosine"):
-    """Sigma per key: MIN + f*(MAX - MIN), where f∈[0,1]."""
     f = _anneal_factor(gen, total_gens, kind)
-    return {
-        k: MUT_SIGMA_MIN[k] + f * (MUT_SIGMA_MAX[k] - MUT_SIGMA_MIN[k])
-        for k in MUT_SIGMA_MAX.keys()
-    }
+    return {k: MUT_SIGMA_MIN[k] + f * (MUT_SIGMA_MAX[k] - MUT_SIGMA_MIN[k])
+            for k in MUT_SIGMA_MAX.keys()}
 
 # ============================================================
-# Genome helpers
-# Each splat row: [x, y, a_log, b_log, theta, r, g, b]  -> total 8 entries
+# Genome helpers (row: [x, y, a_log, b_log, theta, r, g, b])
 # ============================================================
 def random_splat(H:int, W:int, device=DEV) -> torch.Tensor:
-    # sizes (in pixels) then log
     a_log = torch.log(torch.tensor(float(random.uniform(3, 20)), device=device))
     b_log = torch.log(torch.tensor(float(random.uniform(3, 20)), device=device))
     theta = torch.tensor(float(random.uniform(-np.pi, np.pi)), device=device)
     rgb   = torch.tensor([random.uniform(0,255) for _ in range(3)], device=device)
     return torch.tensor([
-        random.random(),            # x in [0,1]
-        random.random(),            # y in [0,1]
-        a_log.item(),
-        b_log.item(),
-        theta.item(),
+        random.random(), random.random(),
+        a_log.item(), b_log.item(), theta.item(),
         rgb[0].item(), rgb[1].item(), rgb[2].item(),
     ], device=device, dtype=torch.float32)
 
 @torch.no_grad()
 def wrap_angle(theta: torch.Tensor) -> torch.Tensor:
-    # wrap to (-pi, pi]
     return (theta + np.pi) % (2*np.pi) - np.pi
 
-def clamp_genome(ind:torch.Tensor) -> torch.Tensor:
-    """
-    Clamp/wrap genome (with theta at column 4). No alpha anywhere.
-    """
-    # x,y
+def clamp_genome(ind: torch.Tensor) -> torch.Tensor:
+    # x,y in [0,1]
     ind[:,0:2] = ind[:,0:2].clamp(0.0, 1.0)
 
-    # a_log, b_log bounds
+    # a_log, b_log (pixel scales, log space)
     max_side = float(max(H, W))
     min_scale_log = torch.log(torch.tensor(MIN_SCALE_SPLATS, device=ind.device))
     max_scale_log = torch.log(torch.tensor(MAX_SCALE_SPLATS * max_side, device=ind.device))
     ind[:,2] = ind[:,2].clamp(min_scale_log, max_scale_log)
     ind[:,3] = ind[:,3].clamp(min_scale_log, max_scale_log)
 
-    # theta: wrap, do NOT clamp
+    # theta: wrap to (-pi, pi]
     ind[:,4] = wrap_angle(ind[:,4])
 
-    # rgb
-    ind[:,5:8] = ind[:,5:8].clamp(0.0, 255.0)
+    # rgb: wrap around 0–255
+    ind[:,5:8] = torch.remainder(ind[:,5:8], 256.0)
 
     return ind
 
 def new_individual(n_splats=N_SPLATS, device=DEV) -> torch.Tensor:
     rows = [random_splat(H, W, device=device) for _ in range(n_splats)]
-    return clamp_genome(torch.stack(rows, dim=0))  # [N,8]
+    return clamp_genome(torch.stack(rows, dim=0))
 
 def duplicate_individual(ind:torch.Tensor) -> torch.Tensor:
     return ind.clone()
+
+# ============================================================
+# Rendering helpers
+# ============================================================
+@torch.no_grad()
+def render_axes_angle_to_img(ind_axes_angle: torch.Tensor, Hsnap:int, Wsnap:int) -> np.ndarray:
+    """Render genome (axes+angle) to [Hsnap,Wsnap,3] uint8 in [0,255]."""
+    ind_render = genome_to_renderer(ind_axes_angle.to(DEV))
+    img = render_splats_rgb(ind_render, Hsnap, Wsnap, k_sigma=K_SIGMA, device=DEV)  # [H,W,3] in [0,1]
+    img8 = (img.clamp(0,1).cpu().numpy() * 255.0).astype("uint8")
+    return img8
+
+@torch.no_grad()
+def save_frame_png(gen:int, ind_axes_angle: torch.Tensor, pad:int, prefix:str="frame"):
+    """Save a frame of the current best individual at working resolution."""
+    if not SAVE_VIDEO:
+        return
+    img8 = render_axes_angle_to_img(ind_axes_angle, H, W)
+    fname = f"{prefix}_{gen:0{pad}d}.png"
+    Image.fromarray(img8).save(os.path.join(VIDEO_DIR, fname))
 
 # ============================================================
 # Fitness: MSE to target (target expected in [0,1], HxW resized)
 # ============================================================
 @torch.no_grad()
 def fitness_mse(ind_axes_angle:torch.Tensor, target:torch.Tensor) -> float:
-    # Convert to renderer format (with Cholesky params, no alpha)
     ind_render = genome_to_renderer(ind_axes_angle).to(DEV)
-    pred = render_splats_rgb(ind_render, H, W, k_sigma=K_SIGMA, device=DEV)  # [H,W,3], in [0,1]
+    pred = render_splats_rgb(ind_render, H, W, k_sigma=K_SIGMA, device=DEV)
     pred = pred.to(target.device)
     return torch.mean((pred - target)**2).item()
 
@@ -173,11 +171,10 @@ def tournament_selection(pop, fits, k=TOUR_K):
     return duplicate_individual(pop[best_idx])
 
 def crossover_swap_splats(a:torch.Tensor, b:torch.Tensor):
-    """One-point crossover at the *row* (splat) level."""
     if a.shape[0] != b.shape[0]:
         raise ValueError("Different N_SPLATS")
     n = a.shape[0]
-    cx = random.randrange(1, n)   # split after cx-1
+    cx = random.randrange(1, n)
     child1 = torch.vstack([a[:cx], b[cx:]])
     child2 = torch.vstack([b[:cx], a[cx:]])
     return child1, child2
@@ -187,9 +184,6 @@ def mutate_individual(ind:torch.Tensor,
                       gen:int,
                       total_gens:int,
                       schedule:str="cosine") -> torch.Tensor:
-    """
-    Mutation with annealed sigmas. Elites get smaller steps via ELITE_SIGMA_MULT.
-    """
     MUTPB = MUTPB_ELITE if is_elite else MUTPB_NON_ELITE
     SIG = build_mut_sigma(gen, total_gens, schedule)
     if is_elite:
@@ -208,7 +202,7 @@ def mutate_individual(ind:torch.Tensor,
         mask = torch.rand_like(ind[:,3]) < MUTPB
         ind[mask,3] += torch.randn((mask.sum(),), device=ind.device) * SIG["blog"]
 
-        # theta (wrap)
+        # theta
         mask = torch.rand_like(ind[:,4]) < MUTPB
         ind[mask,4] += torch.randn((mask.sum(),), device=ind.device) * SIG["theta"]
         ind[:,4] = wrap_angle(ind[:,4])
@@ -218,22 +212,40 @@ def mutate_individual(ind:torch.Tensor,
             mask = torch.rand_like(ind[:,c]) < MUTPB
             ind[mask,c] += torch.randn((mask.sum(),), device=ind.device) * SIG["rgb"]
 
+        if random.random() < SWAP_ORDER_P:
+            # size proxy: area ~ exp(a_log) * exp(b_log)
+            sizes = ind[:,2].exp() * ind[:,3].exp()  # [N]
+            n = ind.shape[0]
+
+            # build candidate pairs (i,j) with j>i and sizes[j] > sizes[i]
+            candidates = []
+            for i in range(n - 1):
+                larger_rel = (sizes[i+1:] > sizes[i]).nonzero(as_tuple=False)
+                if larger_rel.numel() > 0:
+                    j = i + 1 + larger_rel[0,0].item()  # first larger after i
+                    candidates.append((i, j))
+
+            if candidates:
+                i, j = random.choice(candidates)
+                tmp = ind[i].clone()
+                ind[i] = ind[j]
+                ind[j] = tmp
+
     return clamp_genome(ind)
 
 # ============================================================
-# Main GA loop (with tqdm)
+# Main GA loop (with tqdm + frame export)
 # ============================================================
 @torch.no_grad()
 def genetic_approx(target_img_uint8: torch.Tensor) -> Tuple[torch.Tensor, float]:
     """
-    target_img_uint8: [H,W,3] or larger; values 0..255 uint8/float.
-    Returns (best_individual_axes_angle, best_fitness) at the *working* resolution (H,W).
+    Returns (best_individual_axes_angle, best_fitness).
+    Writes a PNG snapshot per FRAME_EVERY generations to VIDEO_DIR at working res (H,W) when SAVE_VIDEO=True.
     """
     # Prepare target at working res in [0,1]
     t = target_img_uint8.to(torch.float32)
     if t.max() > 1.5: t = t / 255.0
     if t.shape[0] != H or t.shape[1] != W:
-        # simple resize using bilinear on BCHW
         tBCHW = t.permute(2,0,1).unsqueeze(0)
         t = torch.nn.functional.interpolate(
             tBCHW, size=(H,W), mode='bilinear', align_corners=False
@@ -248,7 +260,12 @@ def genetic_approx(target_img_uint8: torch.Tensor) -> Tuple[torch.Tensor, float]
     best_ind, best_fit = duplicate_individual(population[best_idx]), fitnesses[best_idx]
     no_improve = 0
 
-    pbar = tqdm(range(GENERATIONS), desc="GA generations", leave=True)
+    # save initial frame (gen 0 = before first iteration)
+    pad = len(str(GENERATIONS))
+    if SAVE_VIDEO and (0 % max(1, FRAME_EVERY) == 0):
+        save_frame_png(0, best_ind, pad, prefix="ga")
+
+    pbar = tqdm(range(1, GENERATIONS+1), desc="GA generations", leave=True)
     try:
         for gen in pbar:
             # -- selection
@@ -277,7 +294,6 @@ def genetic_approx(target_img_uint8: torch.Tensor) -> Tuple[torch.Tensor, float]
             elites = [duplicate_individual(population[i]) for i in elite_idx]
 
             for _, elite in enumerate(elites):
-                # protect the global best if requested
                 if PROTECT_BEST_ELITE and torch.allclose(elite, best_ind):
                     continue
                 if random.random() < ELITE_MUT_FRAC:
@@ -298,7 +314,11 @@ def genetic_approx(target_img_uint8: torch.Tensor) -> Tuple[torch.Tensor, float]
             else:
                 no_improve += 1
 
-            # (optional) show current SIGMA factor in tqdm
+            # -- save frame of current best every FRAME_EVERY generations
+            if SAVE_VIDEO and (gen % max(1, FRAME_EVERY) == 0):
+                save_frame_png(gen, best_ind, pad, prefix="ga")
+
+            # tqdm info
             f = _anneal_factor(gen, GENERATIONS, "cosine")
             pbar.set_postfix(best_mse=f"{best_fit:.6f}", stale=no_improve, sigma_fac=f"{f:.3f}")
 
@@ -316,7 +336,7 @@ def genetic_approx(target_img_uint8: torch.Tensor) -> Tuple[torch.Tensor, float]
 # Example usage
 # ============================================================
 if __name__ == "__main__":
-    img_path = os.path.join(INPUT_DIR, "dog.jpg")
+    img_path = os.path.join(INPUT_DIR, "reference.jpg")
     pil_img = Image.open(img_path).convert("RGB")
     np_img = np.array(pil_img, dtype=np.float32) / 255.0
     target_img = torch.from_numpy(np_img)
@@ -344,3 +364,8 @@ if __name__ == "__main__":
         out_path = os.path.join(OUTPUT_DIR, "ga_splats.png")
         Image.fromarray(img8).save(out_path)
         print("Saved full-resolution result as ga_splats.png")
+
+        if SAVE_VIDEO:
+            print(f"Saved frames (every {FRAME_EVERY} gens) to {VIDEO_DIR}")
+        else:
+            print("Frame saving disabled (SAVE_VIDEO=False).")
