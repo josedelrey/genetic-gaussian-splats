@@ -48,8 +48,6 @@ def genome_to_renderer(ind_axes_angle: torch.Tensor) -> torch.Tensor:
         ind_axes_angle = ind_axes_angle.unsqueeze(0)
 
     N, C = ind_axes_angle.shape
-    if C < 8:
-        raise ValueError(f"genome_to_renderer expects at least 8 columns, got {C}")
 
     out = torch.empty((N, 8), device=ind_axes_angle.device, dtype=ind_axes_angle.dtype)
 
