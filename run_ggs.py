@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import os
-import math
+import numpy as np
 import torch, random
-import matplotlib.pyplot as plt
 import numpy as np
 from typing import Tuple
 from PIL import Image
@@ -13,12 +12,10 @@ from modules.render import render_splats_rgb, _DEV as DEV
 from modules.resize import choose_work_size, scale_genome_pixels_anisotropic
 from modules.encode import genome_to_renderer
 
-# ============================================================
-# Configuration
-# ============================================================
+
 H, W          = 128, 128          # initial placeholder (overwritten by choose_work_size)
-WORK_MAX_SIDE = 256               # working resolution max side for GA
-N_SPLATS      = 128               # genes per individual = N_SPLATS x 9 (theta instead of c_raw)
+WORK_MAX_SIDE = 64                # working resolution max side for GA
+N_SPLATS      = 128               # genes per individual = N_SPLATS x 9
 POP_SIZE      = 64
 GENERATIONS   = 25
 TOUR_K        = 2                 # tournament size
@@ -58,7 +55,7 @@ def random_splat(H:int, W:int, device=DEV) -> torch.Tensor:
     # sizes (in pixels) then log
     a_log = torch.log(torch.tensor(float(random.uniform(3, 20)), device=device))
     b_log = torch.log(torch.tensor(float(random.uniform(3, 20)), device=device))
-    theta = torch.tensor(float(random.uniform(-math.pi, math.pi)), device=device)
+    theta = torch.tensor(float(random.uniform(-np.pi, np.pi)), device=device)
     rgb   = torch.tensor([random.uniform(0,255) for _ in range(3)], device=device)
     alpha = torch.tensor(float(random.uniform(0.05, 0.7)), device=device)
     return torch.tensor([
@@ -74,7 +71,7 @@ def random_splat(H:int, W:int, device=DEV) -> torch.Tensor:
 @torch.no_grad()
 def wrap_angle(theta: torch.Tensor) -> torch.Tensor:
     # wrap to (-pi, pi]
-    return (theta + math.pi) % (2*math.pi) - math.pi
+    return (theta + np.pi) % (2*np.pi) - np.pi
 
 def clamp_genome(ind:torch.Tensor) -> torch.Tensor:
     """

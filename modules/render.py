@@ -1,11 +1,12 @@
 from __future__ import annotations
 import torch
 
+
 _DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 __all__ = [
     "render_splats_rgb",
-    "_render_single_into_beer",   # exposed for step-by-step tests
+    "_render_single_into_beer",
     "_DEV",
 ]
 
