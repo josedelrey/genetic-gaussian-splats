@@ -34,28 +34,34 @@ def axes_angle_to_cholesky(a_log: torch.Tensor, b_log: torch.Tensor, theta: torc
 @torch.no_grad()
 def genome_to_renderer(ind_axes_angle: torch.Tensor) -> torch.Tensor:
     """
-    Convert a genome with theta to renderer format, **without alpha**.
+    Convert a genome with theta (axes+angle space) to renderer space,
+    **preserving alpha if present**.
 
-    Input (new, preferred): [N,8]
-        [x, y, a_log, b_log, theta, r, g, b]
+    Accepts:
+      - [N,9]: [x, y, a_log, b_log, theta, r, g, b, alpha]
+      - [N,8]: [x, y, a_log, b_log, theta, r, g, b]           (alpha assumed 255)
 
-    Also accepts legacy [N,9] with a trailing alpha column; alpha is ignored.
+    Returns (renderer format) [N,9]:
+      [x, y, a_log_eff, b_log_eff, c_raw_eff, r, g, b, alpha]
 
-    Output (renderer format): [N,8]
-        [x, y, a_log_eff, b_log_eff, c_raw_eff, r, g, b]
+    Notes:
+      - r,g,b,alpha are still in 0..255 here; normalization happens in the renderer.
+      - a_log_eff, b_log_eff, c_raw_eff come from the Cholesky parameterization.
     """
     if ind_axes_angle.ndim == 1:
         ind_axes_angle = ind_axes_angle.unsqueeze(0)
 
     N, C = ind_axes_angle.shape
+    if C < 8:
+        raise ValueError(f"Expected 8 or 9 channels, got {C}.")
 
-    out = torch.empty((N, 8), device=ind_axes_angle.device, dtype=ind_axes_angle.dtype)
+    # Allocate output [N,9]
+    out = torch.empty((N, 9), device=ind_axes_angle.device, dtype=ind_axes_angle.dtype)
 
-    # Copy x, y and colors
-    out[:, 0:2] = ind_axes_angle[:, 0:2]      # x, y
-    out[:, 5:8] = ind_axes_angle[:, 5:8]      # r, g, b
+    # x, y
+    out[:, 0:2] = ind_axes_angle[:, 0:2]
 
-    # Convert (a_log, b_log, theta) -> (a_log_eff, b_log_eff, c_raw_eff)
+    # Convert (a_log, b_log, theta) → (a_log_eff, b_log_eff, c_raw_eff)
     a_log_eff, b_log_eff, c_raw_eff = axes_angle_to_cholesky(
         ind_axes_angle[:, 2],  # a_log
         ind_axes_angle[:, 3],  # b_log
@@ -64,5 +70,18 @@ def genome_to_renderer(ind_axes_angle: torch.Tensor) -> torch.Tensor:
     out[:, 2] = a_log_eff
     out[:, 3] = b_log_eff
     out[:, 4] = c_raw_eff
+
+    # Colors
+    out[:, 5:8] = ind_axes_angle[:, 5:8]
+
+    # Alpha: preserve if provided; else default to 255 (fully opaque).
+    if C >= 9:
+        out[:, 8] = ind_axes_angle[:, 8]
+    else:
+        out[:, 8] = 255.0
+
+    # (Optional) keep values in a sane range for channels that should be bytes
+    # Comment out if you prefer to clamp elsewhere.
+    out[:, 5:9].clamp_(0.0, 255.0)
 
     return out
