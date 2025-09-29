@@ -7,19 +7,15 @@ from typing import Tuple, List
 from PIL import Image
 from tqdm.auto import tqdm
 
-# ⬇️ Use your **batched** Triton renderer (the one you pasted)
 from modules.render_triton import render_splats_rgb_triton, _DEV as DEV
 from modules.resize import choose_work_size, scale_genome_pixels_anisotropic
 from modules.encode import genome_to_renderer  # single-sample; we wrap it batched
 
-# ============================================================
-# Config
-# ============================================================
+
 INPUT_DIR    = "imgs"
 OUTPUT_DIR   = "output"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# --- Video controls ---
 SAVE_VIDEO   = True
 FRAME_EVERY  = 100
 
@@ -30,32 +26,30 @@ if SAVE_VIDEO:
 H, W          = 128, 128
 WORK_MAX_SIDE = 512
 N_SPLATS      = 512
-POP_SIZE      = 64
+POP_SIZE      = 8
 GENERATIONS   = 100000
 TOUR_K        = 2
-ELITE_K       = max(1, POP_SIZE // 10)
-CXPB          = 0.7
+ELITE_K       = 4
+CXPB          = 0.05
 
-# Mutation probabilities
-MUTPB_NON_ELITE  = 0.2
-MUTPB_ELITE      = 0.1
-ELITE_MUT_FRAC   = 0.9
+MUTPB = 0.01
 PROTECT_BEST_ELITE = True
-ELITE_SIGMA_MULT = 0.7
 
 K_SIGMA       = 3.0
 SEED          = 42
 
-# Genome clamping
-MIN_SCALE_SPLATS = 1.0
-MAX_SCALE_SPLATS = 0.2
+MIN_SCALE_SPLATS = 0.8            # px (lets you draw hairlines)
+MAX_SCALE_SPLATS = 0.15           # → ~90 px at 256 for broad strokes
 
-# Annealed mutation SIGMA ranges
-MUT_SIGMA_MAX = {"xy":0.05,"alog":0.25,"blog":0.25,"theta":0.35,"rgb":8.0,"alpha":8.0}
-MUT_SIGMA_MIN = {"xy":0.005,"alog":0.05,"blog":0.05,"theta":0.05,"rgb":2.0,"alpha":2.0}
+# xy: fraction of image size
+# a_log, b_log: log()
 
-# Debug checks that would sync host/device if enabled
-DEBUG_CHECKS = False
+MUT_SIGMA_MAX = {"xy":0.1, "alog":1.0, "blog":1.0, "theta":0.3,
+                 "rgb":10.0, "alpha":10.0}
+MUT_SIGMA_MIN = {"xy":0.005,"alog":0.1, "blog":0.1, "theta":0.1,
+                 "rgb":2.0, "alpha":2.0}
+
+SCHEDULE = "cosine"  # "linear", "cosine", "exp"
 
 # Repro
 if SEED is not None:
@@ -65,7 +59,7 @@ if SEED is not None:
 # ============================================================
 # Annealing utils
 # ============================================================
-def _anneal_factor(gen, total, kind="cosine"):
+def _anneal_factor(gen, total, kind):
     g = max(0, min(gen, total))
     p = g / max(1, total)
     if kind == "cosine":
@@ -78,9 +72,9 @@ def _anneal_factor(gen, total, kind="cosine"):
         raw = decay ** g
     else:
         raw = 1.0 - p
-    return max(0.2, raw)
+    return max(0.0, raw)
 
-def build_mut_sigma(gen:int, total_gens:int, kind:str="cosine"):
+def build_mut_sigma(gen:int, total_gens:int, kind:str):
     f = _anneal_factor(gen, total_gens, kind)
     return {k: MUT_SIGMA_MIN[k] + f * (MUT_SIGMA_MAX[k] - MUT_SIGMA_MIN[k]) for k in MUT_SIGMA_MAX.keys()}
 
@@ -117,15 +111,15 @@ def new_population(batch_size:int, n_splats:int, H:int, W:int, device=DEV, dtype
     # scales (sample in linear-sigma, then log)
     s_lo = float(MIN_SCALE_SPLATS)
     s_hi = float(MAX_SCALE_SPLATS * max_side)
-    a = torch.empty(B, N, 1, device=device, dtype=dtype).uniform_(s_lo, s_hi).log_()
-    b = torch.empty(B, N, 1, device=device, dtype=dtype).uniform_(s_lo, s_hi).log_()
+    a = torch.empty(B, N, 1, device=device, dtype=dtype).uniform_(s_lo, s_hi).log()
+    b = torch.empty(B, N, 1, device=device, dtype=dtype).uniform_(s_lo, s_hi).log()
 
     # theta
     theta = torch.empty(B, N, 1, device=device, dtype=dtype).uniform_(-math.pi, math.pi)
 
     # colors + alpha (uint8 range but kept float here)
     rgb   = torch.empty(B, N, 3, device=device, dtype=dtype).uniform_(0.0, 256.0)
-    alpha = torch.empty(B, N, 1, device=device, dtype=dtype).uniform_(64.0, 256.0)
+    alpha = torch.empty(B, N, 1, device=device, dtype=dtype).uniform_(180.0, 256.0)
 
     G = torch.cat([xy, a, b, theta, rgb, alpha], dim=-1)  # [B,N,9]
     # Clamp once (angle wrap optional here; theta is already in-range)
@@ -166,10 +160,6 @@ def genome_to_renderer_batched(G_axes: torch.Tensor) -> torch.Tensor:
 
     R[:, 5:9].clamp_(0.0, 255.0)
 
-    if DEBUG_CHECKS:
-        ok = torch.isfinite(R).all()
-        if not bool(ok.item()):
-            raise RuntimeError("Non-finite values in renderer genome.")
     return R.reshape(B, N, 9)
 
 # ============================================================
@@ -183,7 +173,7 @@ def render_axes_angle_to_img(ind_axes_angle: torch.Tensor, Hsnap:int, Wsnap:int)
     G = ind_axes_angle.unsqueeze(0) if ind_axes_angle.ndim == 2 else ind_axes_angle  # [1,N,C]
     G9 = genome_to_renderer_batched(G)                                               # [1,N,9]
     # No assert here; avoid host sync on first call
-    img = render_splats_rgb_triton(G9, Hsnap, Wsnap, k_sigma=K_SIGMA, device=DEV, tile=64)   # [1,H,W,3]
+    img = render_splats_rgb_triton(G9, Hsnap, Wsnap, k_sigma=K_SIGMA, device=DEV, tile=32)   # [1,H,W,3]
     img = img[0]                                                                     # [H,W,3]
     img8 = (img.clamp(0,1).detach().cpu().numpy() * 255.0).astype("uint8")
     return img8
@@ -202,7 +192,7 @@ def prewarm_renderer(H:int, W:int, device=DEV):
                          device=device, dtype=torch.float32)  # [1,1,9]
     # Warm two common tile sizes so the first "real" render doesn't compile
     _ = render_splats_rgb_triton(dummy, min(8,H), min(8,W), k_sigma=K_SIGMA, device=device, tile=32)
-    _ = render_splats_rgb_triton(dummy, min(8,H), min(8,W), k_sigma=K_SIGMA, device=device, tile=64)
+    _ = render_splats_rgb_triton(dummy, min(8,H), min(8,W), k_sigma=K_SIGMA, device=device, tile=32)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
 
@@ -218,7 +208,7 @@ def fitness_many(pop_batch: List[torch.Tensor], target: torch.Tensor, tile: int 
     """
     G_axes = torch.stack(pop_batch, dim=0)                 # [B,N,C]
     G9 = genome_to_renderer_batched(G_axes)                # [B,N,9]
-    # No assert (avoids sync); rely on DEBUG_CHECKS in converter if needed
+
     imgs = render_splats_rgb_triton(G9, H, W, k_sigma=K_SIGMA, device=DEV, tile=tile)  # [B,H,W,3]
     dif = imgs - target.unsqueeze(0)
     return (dif * dif).mean(dim=(1,2,3))                   # [B]
@@ -247,37 +237,85 @@ def tournament_selection(pop, fits, k=TOUR_K):
             best_idx = i
     return duplicate_individual(pop[best_idx])
 
-def crossover_swap_splats(a:torch.Tensor, b:torch.Tensor):
-    if a.shape[0] != b.shape[0]:
-        raise ValueError("Different N_SPLATS")
-    n = a.shape[0]
-    cx = random.randrange(1, n)
-    child1 = torch.vstack([a[:cx], b[cx:]])
-    child2 = torch.vstack([b[:cx], a[cx:]])
+def crossover_uniform(a, b, p=0.5):
+    m = (torch.rand((a.shape[0],1), device=a.device) < p)
+    child1 = torch.where(m, a, b)
+    child2 = torch.where(m, b, a)
     return child1, child2
 
-def mutate_individual(ind, is_elite, gen, total_gens, schedule="cosine"):
-    MUTPB = MUTPB_ELITE if is_elite else MUTPB_NON_ELITE
+
+def _ensure_one_true(mask: torch.Tensor) -> torch.Tensor:
+    # mask is boolean (or 0/1) tensor on any device
+    if not mask.any():
+        flat = mask.view(-1)
+        k = int(torch.randint(flat.numel(), (1,), device=mask.device).item())
+        flat[k] = True  # flip one random bit on
+    return mask
+
+
+def mutate_individual(ind, is_elite, gen, total_gens, schedule):
     SIG = build_mut_sigma(gen, total_gens, schedule)
-    if is_elite:
-        SIG = {k: v * ELITE_SIGMA_MULT for k, v in SIG.items()}
 
     with torch.no_grad():
-        m_xy = torch.rand((ind.shape[0],2), device=ind.device) < MUTPB
-        ind[:,0:2] += torch.randn_like(ind[:,0:2]) * SIG["xy"] * m_xy.float()
+        N = ind.shape[0]
 
-        m_ab = torch.rand((ind.shape[0],2), device=ind.device) < MUTPB
-        ind[:,2:4] += torch.randn_like(ind[:,2:4]) * torch.tensor([SIG["alog"], SIG["blog"]], device=ind.device) * m_ab.float()
+        # ------------------ masks ------------------
+        m_xy = (torch.rand((N, 2), device=ind.device) < MUTPB)
+        m_ab = (torch.rand((N, 2), device=ind.device) < MUTPB)
+        m_t  = (torch.rand((N, 1), device=ind.device) < MUTPB)
 
-        m_t = (torch.rand((ind.shape[0],1), device=ind.device) < MUTPB).float()
-        ind[:,4:5] += torch.randn_like(ind[:,4:5]) * SIG["theta"] * m_t
-        ind[:,4] = wrap_angle(ind[:,4])
+        # Color: sample 1 flag for the whole RGB triplet, and 1 for alpha
+        m_rgb_flag = (torch.rand((N, 1), device=ind.device) < MUTPB)
+        m_a_flag   = (torch.rand((N, 1), device=ind.device) < MUTPB)
 
-        m_rgba = torch.rand((ind.shape[0],4), device=ind.device) < MUTPB
-        sig_rgba = torch.tensor([SIG["rgb"],SIG["rgb"],SIG["rgb"],SIG["alpha"]], device=ind.device)
-        ind[:,5:9] += torch.randn_like(ind[:,5:9]) * sig_rgba * m_rgba.float()
+        # Keep previous behavior of "at least one color mutation": ensure one of [RGB-group, A] is true
+        m_color_pair = torch.cat([m_rgb_flag, m_a_flag], dim=1)
+        m_color_pair = _ensure_one_true(m_color_pair)
+        m_rgb_flag = m_color_pair[:, 0:1]
+        m_a_flag   = m_color_pair[:, 1:2]
 
-    return clamp_genome(ind)
+        # Expand RGB group flag to 3 channels, then append A -> shape [N,4]
+        m_rgba = torch.cat([m_rgb_flag.expand(-1, 3), m_a_flag], dim=1)
+
+        # Also keep "at least one true" per group for the other masks
+        m_xy = _ensure_one_true(m_xy)
+        m_ab = _ensure_one_true(m_ab)
+        m_t  = _ensure_one_true(m_t)
+
+        # ------------------ numeric mutations ------------------
+        ind[:, 0:2] += torch.randn_like(ind[:, 0:2]) * SIG["xy"] * m_xy.float()
+
+        ind[:, 2:4] += (
+            torch.randn_like(ind[:, 2:4])
+            * torch.tensor([SIG["alog"], SIG["blog"]], device=ind.device, dtype=ind.dtype)
+            * m_ab.float()
+        )
+
+        ind[:, 4:5] += torch.randn_like(ind[:, 4:5]) * SIG["theta"] * m_t.float()
+        ind[:, 4] = wrap_angle(ind[:, 4])
+
+        sig_rgba = torch.tensor([SIG["rgb"], SIG["rgb"], SIG["rgb"], SIG["alpha"]],
+                                device=ind.device, dtype=ind.dtype)
+        ind[:, 5:9] += torch.randn_like(ind[:, 5:9]) * sig_rgba * m_rgba.float()
+
+        # Clamp after numeric edits (keeps sizes/colors in range)
+        clamp_genome(ind)
+
+        # ------------------ render-order swap (detail-preserving) ------------------
+        if N >= 2:
+            i = int(torch.randint(0, N - 1, (1,), device=ind.device).item())
+            size = torch.exp(ind[:, 2]) * torch.exp(ind[:, 3])  # proxy: sigma_x * sigma_y
+            later = torch.arange(i + 1, N, device=ind.device)
+            if later.numel() > 0:
+                bigger_mask = size[later] > size[i]
+                if bigger_mask.any():
+                    candidates = later[bigger_mask]
+                    j = int(candidates[torch.randint(0, candidates.numel(), (1,), device=ind.device)].item())
+                    tmp = ind[i].clone()
+                    ind[i] = ind[j]
+                    ind[j] = tmp
+
+    return ind
 
 # ============================================================
 # Main GA loop (with tqdm + frame export)
@@ -300,7 +338,7 @@ def genetic_approx(target_img_uint8: torch.Tensor) -> Tuple[torch.Tensor, float]
 
     # ---- Fitness (batched) ----
     INIT_CHUNK = None  # set to e.g. 32 if VRAM limited
-    fitnesses  = fitness_population(population, target, tile=64, chunk=INIT_CHUNK)
+    fitnesses  = fitness_population(population, target, tile=32, chunk=INIT_CHUNK)
 
     best_idx = min(range(POP_SIZE), key=lambda i: fitnesses[i])
     best_ind = duplicate_individual(population[best_idx])
@@ -318,35 +356,32 @@ def genetic_approx(target_img_uint8: torch.Tensor) -> Tuple[torch.Tensor, float]
             while len(parents) < POP_SIZE:
                 parents.append(tournament_selection(population, fitnesses, k=TOUR_K))
 
+            random.shuffle(parents)
+
             offspring = []
             for i in range(0, POP_SIZE, 2):
                 a = parents[i]
                 b = parents[(i+1) % POP_SIZE]
                 if random.random() < CXPB:
-                    c1, c2 = crossover_swap_splats(a, b)
+                    c1, c2 = crossover_uniform(a, b)
                 else:
                     c1, c2 = duplicate_individual(a), duplicate_individual(b)
-                offspring.append(mutate_individual(c1, is_elite=False, gen=gen, total_gens=GENERATIONS))
+                offspring.append(mutate_individual(c1, is_elite=False, gen=gen, total_gens=GENERATIONS, schedule=SCHEDULE))
                 if len(offspring) < POP_SIZE:
-                    offspring.append(mutate_individual(c2, is_elite=False, gen=gen, total_gens=GENERATIONS))
+                    offspring.append(mutate_individual(c2, is_elite=False, gen=gen, total_gens=GENERATIONS, schedule=SCHEDULE))
 
             # Offspring fitness (batched)
             OFFSPRING_CHUNK = None
-            off_fits = fitness_population(offspring, target, tile=64, chunk=OFFSPRING_CHUNK)
+            off_fits = fitness_population(offspring, target, tile=32, chunk=OFFSPRING_CHUNK)
 
             # Elites
-            elite_idx = sorted(range(POP_SIZE), key=lambda i: fitnesses[i])[:ELITE_K]
+            elite_k = max(1, ELITE_K)
+            elite_idx = sorted(range(POP_SIZE), key=lambda i: fitnesses[i])[:elite_k]
             elites = [duplicate_individual(population[i]) for i in elite_idx]
-
-            for _, elite in enumerate(elites):
-                if PROTECT_BEST_ELITE and torch.allclose(elite, best_ind):
-                    continue
-                if random.random() < ELITE_MUT_FRAC:
-                    mutate_individual(elite, is_elite=True, gen=gen, total_gens=GENERATIONS)
 
             # Elite fitness (batched)
             ELITE_CHUNK = None
-            elite_fits = fitness_population(elites, target, tile=64, chunk=ELITE_CHUNK)
+            elite_fits = fitness_population(elites, target, tile=32, chunk=ELITE_CHUNK)
 
             # Next generation
             population = elites + offspring[:POP_SIZE-ELITE_K]
@@ -363,7 +398,7 @@ def genetic_approx(target_img_uint8: torch.Tensor) -> Tuple[torch.Tensor, float]
             if SAVE_VIDEO and (gen % max(1, FRAME_EVERY) == 0):
                 save_frame_png(gen, best_ind, pad, prefix="ga")
 
-            f = _anneal_factor(gen, GENERATIONS, "cosine")
+            f = _anneal_factor(gen, GENERATIONS, SCHEDULE)
             pbar.set_postfix(best_mse=f"{best_fit:.6f}", stale=no_improve, sigma_fac=f"{f:.3f}")
 
     except KeyboardInterrupt:
@@ -402,7 +437,7 @@ if __name__ == "__main__":
             best_ind_full_render = torch.cat([best_ind_full_render, pad], dim=1)
 
         # Use the same batched renderer with B=1 for the final image
-        final = render_splats_rgb_triton(best_ind_full_render.unsqueeze(0), H_out, W_out, k_sigma=K_SIGMA, device=DEV, tile=64)[0]
+        final = render_splats_rgb_triton(best_ind_full_render.unsqueeze(0), H_out, W_out, k_sigma=K_SIGMA, device=DEV, tile=32)[0]
         img8 = (final.clamp(0,1).detach().cpu().numpy() * 255).astype('uint8')
         out_path = os.path.join(OUTPUT_DIR, "ga_splats.png")
         Image.fromarray(img8).save(out_path)
