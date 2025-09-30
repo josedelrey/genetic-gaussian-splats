@@ -38,7 +38,6 @@ def compute_importance_mask(
 ) -> torch.Tensor:
     dev = target_hw3.device
 
-    # Use correct resolution
     x = target_hw3
     if x.max() > 1.5: x = x / 255.0
     x4 = x.permute(2,0,1).unsqueeze(0)  # [1,3,H0,W0]

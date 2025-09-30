@@ -34,10 +34,10 @@ def genome_to_renderer(ind_axes_angle: torch.Tensor) -> torch.Tensor:
     # Allocate output [N,9]
     out = torch.empty((N, 9), device=ind_axes_angle.device, dtype=ind_axes_angle.dtype)
 
-    # x, y
+    # xy
     out[:, 0:2] = ind_axes_angle[:, 0:2]
 
-    # Convert (a_log, b_log, theta) to (a_log_eff, b_log_eff, c_raw_eff)
+    # Convert (a_log,b_log,theta) to (a_log_eff,b_log_eff,c_raw_eff)
     a_log_eff, b_log_eff, c_raw_eff = axes_angle_to_cholesky(
         ind_axes_angle[:, 2],  # a_log
         ind_axes_angle[:, 3],  # b_log
@@ -61,15 +61,10 @@ def genome_to_renderer(ind_axes_angle: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def genome_to_renderer_batched(G_axes: torch.Tensor) -> torch.Tensor:
-    """
-    G_axes: [B,N,C] with C in {8,9}; axes-angle format
-    Returns: [B,N,9] = [x,y,a_log_eff,b_log_eff,c_raw_eff,r,g,b,alpha]
-    """
-    assert G_axes.ndim == 3, f"Expected [B,N,C], got {G_axes.shape}"
     B, N, C = G_axes.shape
     Gf = G_axes.reshape(B * N, C)
 
-    R = genome_to_renderer(Gf)  # [B*N, 9 or >9]
+    R = genome_to_renderer(Gf)
     if R.shape[1] < 9:
         if C >= 9:
             a = Gf[:, 8:9]
