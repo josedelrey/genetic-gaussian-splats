@@ -48,11 +48,6 @@ if SEED is not None:
 MIN_SCALE_SPLATS = 0.8
 MAX_SCALE_SPLATS = 0.15
 
-# MUT_SIGMA_MAX = {"xy":0.1, "alog":0.5, "blog":0.5, "theta":0.3,
-#                  "rgb":20.0, "alpha":20.0}
-# MUT_SIGMA_MIN = {"xy":0.005,"alog":0.01, "blog":0.01, "theta":0.01,
-#                  "rgb":1.0, "alpha":1.0}
-
 MUT_SIGMA_MAX = {"xy":0.1, "alog":0.5, "blog":0.5, "theta":0.3,
                  "rgb":25.0, "alpha":25.0}
 MUT_SIGMA_MIN = {"xy":0.01,"alog":0.05, "blog":0.05, "theta":0.025,
