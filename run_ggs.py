@@ -16,6 +16,7 @@ from modules.mask import compute_importance_mask
 
 INPUT_DIR    = "imgs"
 OUTPUT_DIR   = "output"
+REF_IMG     = "reference.jpg"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 SAVE_VIDEO   = True
@@ -40,6 +41,10 @@ PROTECT_BEST_ELITE = True
 K_SIGMA       = 3.0
 SEED          = 42
 
+if SEED is not None:
+    random.seed(SEED); torch.manual_seed(SEED)
+    if torch.cuda.is_available(): torch.cuda.manual_seed_all(SEED)
+
 MIN_SCALE_SPLATS = 0.8
 MAX_SCALE_SPLATS = 0.15
 
@@ -56,18 +61,13 @@ MUT_SIGMA_MIN = {"xy":0.01,"alog":0.05, "blog":0.05, "theta":0.025,
 SCHEDULE = "cosine"  # "linear", "cosine", "exp"
 
 MASK_STRENGTH = 0.7  # 1.0 = full, 0.0 = plain MSE
-BOOST_ONLY    = False  # If True, use mask to only boost important areas instead of weighting all pixels
-
-# Repro
-if SEED is not None:
-    random.seed(SEED); torch.manual_seed(SEED)
-    if torch.cuda.is_available(): torch.cuda.manual_seed_all(SEED)
+BOOST_ONLY    = False  # If True, use mask to only boost important areas over plain MSE
 
 
 @torch.no_grad()
 def render_axes_angle_to_img(ind_axes_angle: torch.Tensor, Hsnap:int, Wsnap:int) -> np.ndarray:
     G = ind_axes_angle.unsqueeze(0) if ind_axes_angle.ndim == 2 else ind_axes_angle  # [1,N,C]
-    G9 = genome_to_renderer_batched(G)                                               # [1,N,9]
+    G9 = genome_to_renderer_batched(G)  # [1,N,9]
     img = render_splats_rgb_triton(G9, Hsnap, Wsnap, k_sigma=K_SIGMA, device=DEV, tile=32)[0]  # [H,W,3]
     img8 = (img.clamp(0,1).detach().cpu().numpy() * 255.0).astype("uint8")
     return img8
@@ -169,15 +169,15 @@ def fitness_many(pop_batch, target, tile: int = 32,
                  weight_mask: torch.Tensor | None = None,
                  boost_only: bool = False,
                  boost_beta: float = 1.0):
-    G_axes = torch.stack(pop_batch, dim=0)          # [B,N,C]
-    G9 = genome_to_renderer_batched(G_axes)         # [B,N,9]
+    G_axes = torch.stack(pop_batch, dim=0)  # [B,N,C]
+    G9 = genome_to_renderer_batched(G_axes)  # [B,N,9]
     imgs = render_splats_rgb_triton(G9, H, W, k_sigma=K_SIGMA, device=DEV, tile=tile)  # [B,H,W,3]
-    dif2 = (imgs - target.unsqueeze(0)) ** 2        # [B,H,W,3]
+    dif2 = (imgs - target.unsqueeze(0)) ** 2  # [B,H,W,3]
 
     if weight_mask is None:
         return dif2.mean(dim=(1,2,3))
 
-    w = weight_mask.unsqueeze(0).unsqueeze(-1)      # [1,H,W,1]
+    w = weight_mask.unsqueeze(0).unsqueeze(-1)  # [1,H,W,1]
 
     if boost_only:
         w_boost = 1.0 + boost_beta * w.clamp(0, 1)
@@ -239,7 +239,7 @@ def mutate_individual(ind, is_elite, gen, total_gens, schedule):
         m_ab = (torch.rand((N, 2), device=ind.device) < MUTPB)
         m_t  = (torch.rand((N, 1), device=ind.device) < MUTPB)
 
-        # Color + alpha mutation: ensure at least one of RGBA mutates
+        # Color + alpha mutation, ensure at least one of RGBA mutates
         m_rgb_flag = (torch.rand((N, 1), device=ind.device) < MUTPB)
         m_a_flag   = (torch.rand((N, 1), device=ind.device) < MUTPB)
 
@@ -272,7 +272,7 @@ def mutate_individual(ind, is_elite, gen, total_gens, schedule):
 
         clamp_genome(ind)
 
-        # Rendering order mutation: swap two splats
+        # Swap two splats
         if N >= 2:
             i = int(torch.randint(0, N - 1, (1,), device=ind.device).item())
             size = torch.exp(ind[:, 2]) * torch.exp(ind[:, 3])  # proxy: sigma_x * sigma_y
@@ -288,7 +288,8 @@ def mutate_individual(ind, is_elite, gen, total_gens, schedule):
 
     return ind
 
-# Main GA loop
+
+# Main genetic algorithm loop
 @torch.no_grad()
 def genetic_approx(target_img_uint8: torch.Tensor) -> Tuple[torch.Tensor, float]:
     t = target_img_uint8.to(torch.float32)
@@ -306,7 +307,6 @@ def genetic_approx(target_img_uint8: torch.Tensor) -> Tuple[torch.Tensor, float]
         smooth=3,
         strength=MASK_STRENGTH
     ).to(DEV) 
-
 
     target = t.to(DEV)
     prewarm_renderer(H, W, device=DEV)
@@ -389,7 +389,7 @@ def genetic_approx(target_img_uint8: torch.Tensor) -> Tuple[torch.Tensor, float]
 
 
 if __name__ == "__main__":
-    img_path = os.path.join(INPUT_DIR, "reference.jpg")
+    img_path = os.path.join(INPUT_DIR, REF_IMG)
     pil_img = Image.open(img_path).convert("RGB")
     np_img = np.array(pil_img, dtype=np.float32) / 255.0
     target_img = torch.from_numpy(np_img)
@@ -398,21 +398,20 @@ if __name__ == "__main__":
     H, W = choose_work_size(H_out, W_out, max_side=WORK_MAX_SIDE)
 
     best_ind, best_fit = genetic_approx(target_img)
-    print("Best MSE (working res):", best_fit)
+    print("Best MSE:", best_fit)
 
     if best_ind is not None:
         sH = H_out / float(H); sW = W_out / float(W)
         best_ind_full = scale_genome_pixels_anisotropic(best_ind.to(DEV), sH=sH, sW=sW)
         best_ind_full_render = genome_to_renderer(best_ind_full)
 
-        final = render_splats_rgb_triton(best_ind_full_render.unsqueeze(0), H_out, W_out, k_sigma=K_SIGMA, device=DEV, tile=32)[0]
+        final = render_splats_rgb_triton(best_ind_full_render.unsqueeze(0), H_out, W_out, 
+                                         k_sigma=K_SIGMA, device=DEV, tile=32)[0]
         img8 = (final.clamp(0,1).detach().cpu().numpy() * 255).astype('uint8')
         out_path = os.path.join(OUTPUT_DIR, "ga_splats.png")
-        
+
         Image.fromarray(img8).save(out_path)
         print("Saved full-resolution result as ga_splats.png")
 
         if SAVE_VIDEO:
-            print(f"Saved frames (every {FRAME_EVERY} gens) to {VIDEO_DIR}")
-        else:
-            print("Frame saving disabled (SAVE_VIDEO=False).")
+            print(f"Saved frames to {VIDEO_DIR}")
