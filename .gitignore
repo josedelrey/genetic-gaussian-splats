@@ -4,4 +4,5 @@ output
 _test_out
 _test_scripts
 _previous_runs
+_previous_outs
 .github
