@@ -55,7 +55,7 @@ if __name__ == "__main__":
         boost_only=BOOST_ONLY,
 
         # SA loop
-        iterations=SA_ITERATIONS,
+        iterations=GENERATIONS,
         temp0=SA_T0,
         temp_schedule=SA_SCHEDULE,
         tries_per_iter=SA_TRIES_PER_ITER,
