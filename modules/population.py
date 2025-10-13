@@ -3,6 +3,20 @@ import torch
 from typing import List
 
 
+def sample_log_scales_beta_linear(B, N, s_lo, s_hi, m=0.5, concentration=8.0, device='cuda', dtype=torch.float32):
+    # m in [0,1] is where you want the mean in the *linear* [s_lo, s_hi] range.
+    eps = 1e-6
+    alpha = torch.tensor(m * max(concentration, eps) + eps, device=device, dtype=dtype)
+    beta  = torch.tensor((1 - m) * max(concentration, eps) + eps, device=device, dtype=dtype)
+
+    dist = torch.distributions.Beta(alpha, beta)
+    u = dist.sample((B, N, 1))                       # in [0,1]
+    sigma = s_lo + u * (s_hi - s_lo)                 # map to [s_lo, s_hi]
+    log_sigma = sigma.log()
+    return log_sigma  # shape (B, N, 1)
+
+
+
 @torch.no_grad()
 def new_population(batch_size: int, n_splats: int, H: int, W: int, 
                   min_scale_splats: float, max_scale_splats: float,
@@ -17,8 +31,9 @@ def new_population(batch_size: int, n_splats: int, H: int, W: int,
     # Scales (sample in linear-sigma, then log)
     s_lo = float(min_scale_splats)
     s_hi = float(max_scale_splats * max_side)
-    a = torch.empty(B, N, 1, device=device, dtype=dtype).uniform_(s_lo, s_hi).log()
-    b = torch.empty(B, N, 1, device=device, dtype=dtype).uniform_(s_lo, s_hi).log()
+    a = sample_log_scales_beta_linear(B, N, s_lo, s_hi, m=0.3, concentration=7.0, device=device, dtype=dtype)
+    b = sample_log_scales_beta_linear(B, N, s_lo, s_hi, m=0.5, concentration=7.0, device=device, dtype=dtype)
+
 
     # Theta
     theta = torch.empty(B, N, 1, device=device, dtype=dtype).uniform_(-math.pi, math.pi)
