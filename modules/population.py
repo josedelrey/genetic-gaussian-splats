@@ -31,8 +31,8 @@ def new_population(batch_size: int, n_splats: int, H: int, W: int,
     # Scales (sample in linear-sigma, then log)
     s_lo = float(min_scale_splats)
     s_hi = float(max_scale_splats * max_side)
-    a = sample_log_scales_beta_linear(B, N, s_lo, s_hi, m=0.3, concentration=7.0, device=device, dtype=dtype)
-    b = sample_log_scales_beta_linear(B, N, s_lo, s_hi, m=0.5, concentration=7.0, device=device, dtype=dtype)
+    a = sample_log_scales_beta_linear(B, N, s_lo, s_hi, m=0.4, concentration=8.0, device=device, dtype=dtype)
+    b = sample_log_scales_beta_linear(B, N, s_lo, s_hi, m=0.6, concentration=8.0, device=device, dtype=dtype)
 
 
     # Theta
