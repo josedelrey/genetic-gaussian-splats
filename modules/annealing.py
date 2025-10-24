@@ -27,10 +27,8 @@ def _ensure_hw(target_img_uint8: torch.Tensor, H:int, W:int) -> torch.Tensor:
 
 
 def _temp_schedule(kind:str, T0:float, i:int, total:int) -> float:
-    """Temperature schedule T(i). i starts at 0."""
     p = i / max(1, total)
-    if kind == "exp":           # geometric
-        # decays to ~1% by the end
+    if kind == "exp":
         r = 0.01 ** (1.0 / max(1,total))
         return T0 * (r ** i)
     elif kind == "linear":
@@ -41,7 +39,7 @@ def _temp_schedule(kind:str, T0:float, i:int, total:int) -> float:
         return max(1e-12, T0 / (1.0 + math.log(1.0 + 9.0 * i)))
     elif kind == "cauchy":
         return max(1e-12, T0 / (1.0 + i))
-    else:  # default: exp
+    else:
         r = 0.01 ** (1.0 / max(1,total))
         return T0 * (r ** i)
 
@@ -51,16 +49,16 @@ def simulated_annealing(
     target_img_uint8: torch.Tensor,
     H:int, W:int, device,
 
-    # genome / neighborhood
+    # Genome / neighborhood
     n_splats:int,
     mutpb:float,
     mut_sigma_max:dict,
     mut_sigma_min:dict,
-    sigma_schedule:str,              # reuse your GA sigma schedule ("linear","cosine","exp")
+    sigma_schedule:str,
     min_scale_splats:float,
     max_scale_splats:float,
 
-    # renderer / fitness
+    # Renderer / fitness
     k_sigma:float,
     mask_strength:float,
     boost_only:bool,
@@ -68,10 +66,10 @@ def simulated_annealing(
     # SA loop
     iterations:int,
     temp0:float,
-    temp_schedule:str,               # "exp","linear","cosine","log","cauchy"
-    tries_per_iter:int = 1,          # how many neighbors per T step
+    temp_schedule:str,
+    tries_per_iter:int = 1,
 
-    # saving / logs
+    # Saving / logs
     save_video:bool = False,
     frame_every:int = 10_000,
     video_dir:str = "",
@@ -85,7 +83,7 @@ def simulated_annealing(
     Returns (best_individual_axes_angle, best_mse).
     """
 
-    # --- prep image + importance mask ---
+    # Prepare image and mask
     t = _ensure_hw(target_img_uint8, H, W)
     target = t.to(device)
     imp_mask = compute_importance_mask(
@@ -97,17 +95,16 @@ def simulated_annealing(
 
     prewarm_renderer(H, W, k_sigma, device)
 
-    # --- initial solution ---
+    # Initialize current and best individual
     curr = new_individual(n_splats, H, W, min_scale_splats, max_scale_splats, device=device)
     curr_fit = fitness_population([curr], target, H, W, k_sigma, device,
                                   tile=32, chunk=None, weight_mask=imp_mask, boost_only=boost_only)[0]
     best = duplicate_individual(curr)
     best_fit = float(curr_fit)
 
-    # curves (store energies = MSE)
     curves = {"best":[best_fit], "current":[float(curr_fit)]}
 
-    # save first frame
+    # Save initial frame
     pad = len(str(iterations))
     if save_video and (0 % max(1, frame_every) == 0):
         save_frame_png(0, best, pad, prefix, video_dir, H, W, k_sigma, device, save_video)
@@ -116,15 +113,12 @@ def simulated_annealing(
     try:
         for it in pbar:
             T = _temp_schedule(temp_schedule, temp0, it, iterations)
-            # also cool mutation sigmas with your scheduler for stability
-            # reuse your GA schedule helper via _anneal_factor
-            _ = _anneal_factor(it, iterations, sigma_schedule)  # just for postfix progress
+            _ = _anneal_factor(it, iterations, sigma_schedule)
 
             accepted_any = False
             e_curr = float(curr_fit)
 
             for _try in range(tries_per_iter):
-                # propose neighbor by GA-style mutation (single individual)
                 neighbor = duplicate_individual(curr)
                 neighbor = mutate_individual(
                     neighbor, is_elite=False, gen=it, total_gens=iterations,
@@ -136,16 +130,13 @@ def simulated_annealing(
                 e_new = fitness_population([neighbor], target, H, W, k_sigma, device,
                                            tile=32, chunk=None, weight_mask=imp_mask, boost_only=boost_only)[0]
 
-                # ΔE (note: pseudocode used Δf with "higher is better"; here E=MSE, lower is better)
                 dE = float(e_new) - e_curr
                 if dE <= 0.0:
-                    # improvement: accept
                     curr = neighbor
                     curr_fit = float(e_new)
                     e_curr = curr_fit
                     accepted_any = True
                 else:
-                    # worse: accept with probability exp(-ΔE/T)
                     if T > 0.0:
                         prob = math.exp(-dE / T)
                         if random.random() < prob:
@@ -154,16 +145,15 @@ def simulated_annealing(
                             e_curr = curr_fit
                             accepted_any = True
 
-                # update global best
                 if e_curr + 1e-12 < best_fit:
                     best_fit = e_curr
                     best = duplicate_individual(curr)
 
-            # curves/logs
+            # Update curves
             curves["best"].append(best_fit)
             curves["current"].append(float(curr_fit))
 
-            # frames
+            # Save frame
             if save_video and ((it + 1) % max(1, frame_every) == 0):
                 save_frame_png(it + 1, best, pad, prefix, video_dir, H, W, k_sigma, device, save_video)
 
@@ -181,7 +171,7 @@ def simulated_annealing(
         except Exception:
             pass
 
-    # save curves
+    # Save curves
     try:
         save_loss_curve_png(
             curves, loss_png_path,

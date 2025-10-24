@@ -10,7 +10,6 @@ def fitness_many(pop_batch: List[torch.Tensor], target: torch.Tensor, H: int, W:
                 weight_mask: torch.Tensor | None = None,
                 boost_only: bool = False,
                 boost_beta: float = 1.0):
-    """Evaluate fitness for a batch of individuals."""
     G_axes = torch.stack(pop_batch, dim=0)  # [B,N,C]
     G9 = genome_to_renderer_batched(G_axes)  # [B,N,9]
     imgs = render_splats_rgb_triton(G9, H, W, k_sigma=k_sigma, device=device, tile=tile)  # [B,H,W,3]
@@ -38,7 +37,6 @@ def fitness_population(population: List[torch.Tensor], target: torch.Tensor,
                       tile: int = 32, chunk: int | None = None,
                       weight_mask: torch.Tensor | None = None,
                       boost_only: bool = False) -> List[float]:
-    """Evaluate fitness for entire population with optional chunking."""
     if chunk is None or chunk >= len(population):
         return fitness_many(population, target, H, W, k_sigma, device, tile=tile, 
                             weight_mask=weight_mask, boost_only=boost_only).detach().cpu().tolist()

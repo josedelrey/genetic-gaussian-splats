@@ -29,11 +29,6 @@ def genetic_approx(target_img_uint8: torch.Tensor,
                    loss_png_path: str = "",
                    loss_csv_path: str = "",
                    loss_log_y: bool = False) -> Tuple[torch.Tensor, float]:
-    """
-    Main genetic algorithm loop.
-    Also records fitness curves and optionally saves a PNG and CSV at the end.
-    """
-
     # Prepare target image
     t = target_img_uint8.to(torch.float32)
     if t.max() > 1.5:

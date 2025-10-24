@@ -4,14 +4,14 @@
 DEFAULT_WORK_RESOLUTION = (128, 128)  # H, W
 WORK_MAX_SIDE = 512
 N_SPLATS = 512
-POP_SIZE = 8
+POP_SIZE = 32
 GENERATIONS = 500000
 TOUR_K = 2  # Tournament selection size
-ELITE_K = 4  # Number of elites to preserve
+ELITE_K = 8  # Number of elites to preserve
 CXPB = 0.05  # Crossover probability
 
 # Mutation parameters
-MUTPB = 0.01  # Mutation probability
+MUTPB = 0.05  # Mutation probability
 PROTECT_BEST_ELITE = True
 
 # Rendering parameters
@@ -67,7 +67,7 @@ FRAME_EVERY = max(1, GENERATIONS // (FPS * VIDEO_LEN))
 SAVE_LOSS_CURVE = True
 LOSS_LOG_Y = True
 
-# ----- SA parameters (Simulated Annealing) -----
-SA_TRIES_PER_ITER = 1           # neighbors per iteration (can raise to 2~8)
-SA_T0 = 5e-4                    # initial temperature (in MSE units). Tune per image/scale (0 = auto-estimate)
-SA_SCHEDULE = "exp"             # "exp", "linear", "cosine", "log", "cauchy"
+# SA Parameters
+SA_TRIES_PER_ITER = 8
+SA_T0 = 1e-3
+SA_SCHEDULE = "cosine"

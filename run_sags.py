@@ -27,29 +27,29 @@ if SEED is not None:
     if torch.cuda.is_available(): torch.cuda.manual_seed_all(SEED)
 
 if __name__ == "__main__":
-    # load target
+    # Load target image
     img_path = os.path.join(INPUT_DIR, REF_IMG)
     pil_img = Image.open(img_path).convert("RGB")
     np_img = np.array(pil_img, dtype=np.float32) / 255.0
     target_img = torch.from_numpy(np_img)
 
-    # work size
+    # Working resolution
     H_out, W_out = target_img.shape[0], target_img.shape[1]
     H, W = choose_work_size(H_out, W_out, max_side=WORK_MAX_SIDE)
 
-    # run SA
+    # Run SA
     best_ind, best_fit = simulated_annealing(
         target_img, H=H, W=W, device=DEV,
-        # genome / neighborhood
+        # Genome / neighborhood
         n_splats=N_SPLATS,
         mutpb=MUTPB,
         mut_sigma_max=MUT_SIGMA_MAX,
         mut_sigma_min=MUT_SIGMA_MIN,
-        sigma_schedule=SCHEDULE,  # reuse your GA schedule for mutation size
+        sigma_schedule=SCHEDULE,
         min_scale_splats=MIN_SCALE_SPLATS,
         max_scale_splats=MAX_SCALE_SPLATS,
 
-        # renderer / fitness
+        # Rendering / loss
         k_sigma=K_SIGMA,
         mask_strength=MASK_STRENGTH,
         boost_only=BOOST_ONLY,
@@ -60,7 +60,7 @@ if __name__ == "__main__":
         temp_schedule=SA_SCHEDULE,
         tries_per_iter=SA_TRIES_PER_ITER,
 
-        # saving
+        # Saving / logs
         save_video=SAVE_VIDEO,
         frame_every=FRAME_EVERY,
         video_dir=VIDEO_DIR,
@@ -74,7 +74,7 @@ if __name__ == "__main__":
     if SA_LOSS_PNG: print(f"Loss plot saved to {SA_LOSS_PNG}")
     if SA_LOSS_CSV: print(f"Loss CSV saved to {SA_LOSS_CSV}")
 
-    # upscale best to full res + final render
+    # Render and save full-resolution result
     if best_ind is not None:
         sH = H_out / float(H); sW = W_out / float(W)
         best_ind_full = scale_genome_pixels_anisotropic(best_ind.to(DEV), sH=sH, sW=sW)

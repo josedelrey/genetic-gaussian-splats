@@ -6,7 +6,6 @@ from modules.utils import wrap_angle, build_mut_sigma, clamp_genome
 
 
 def tournament_selection(pop: List[torch.Tensor], fits: List[float], k: int = 2) -> torch.Tensor:
-    """Tournament selection for parent selection."""
     best_idx = None
     for _ in range(k):
         i = random.randrange(len(pop))
@@ -16,7 +15,6 @@ def tournament_selection(pop: List[torch.Tensor], fits: List[float], k: int = 2)
 
 
 def crossover_uniform(a: torch.Tensor, b: torch.Tensor, p: float = 0.5):
-    """Uniform crossover between two parents."""
     m = (torch.rand((a.shape[0],1), device=a.device) < p)
     child1 = torch.where(m, a, b)
     child2 = torch.where(m, b, a)
@@ -24,7 +22,6 @@ def crossover_uniform(a: torch.Tensor, b: torch.Tensor, p: float = 0.5):
 
 
 def _ensure_one_true(mask: torch.Tensor) -> torch.Tensor:
-    """Ensure at least one element in mask is True."""
     if not mask.any():
         flat = mask.view(-1)
         k = int(torch.randint(flat.numel(), (1,), device=mask.device).item())
@@ -36,7 +33,6 @@ def mutate_individual(ind: torch.Tensor, is_elite: bool, gen: int, total_gens: i
                      schedule: str, mut_sigma_max: dict, mut_sigma_min: dict,
                      mutpb: float, H: int, W: int, min_scale_splats: float, 
                      max_scale_splats: float):
-    """Mutate an individual genome."""
     SIG = build_mut_sigma(gen, total_gens, schedule, mut_sigma_max, mut_sigma_min)
 
     with torch.no_grad():
@@ -83,7 +79,7 @@ def mutate_individual(ind: torch.Tensor, is_elite: bool, gen: int, total_gens: i
         # Swap two splats
         if N >= 2:
             i = int(torch.randint(0, N - 1, (1,), device=ind.device).item())
-            size = torch.exp(ind[:, 2]) * torch.exp(ind[:, 3])  # proxy: sigma_x * sigma_y
+            size = torch.exp(ind[:, 2]) * torch.exp(ind[:, 3])
             later = torch.arange(i + 1, N, device=ind.device)
             if later.numel() > 0:
                 bigger_mask = size[later] > size[i]

@@ -9,12 +9,10 @@ from typing import Dict, Sequence
 
 @torch.no_grad()
 def wrap_angle(theta: torch.Tensor) -> torch.Tensor:
-    """Wrap angle to [-π, π] range."""
     return (theta + np.pi) % (2*np.pi) - np.pi
 
 
 def _anneal_factor(gen, total, kind):
-    """Compute annealing factor for mutation schedules."""
     g = max(0, min(gen, total))
     p = g / max(1, total)
     if kind == "cosine":
@@ -31,13 +29,11 @@ def _anneal_factor(gen, total, kind):
 
 
 def build_mut_sigma(gen: int, total_gens: int, kind: str, mut_sigma_max: dict, mut_sigma_min: dict):
-    """Build mutation sigma values for current generation."""
     f = _anneal_factor(gen, total_gens, kind)
     return {k: mut_sigma_min[k] + f * (mut_sigma_max[k] - mut_sigma_min[k]) for k in mut_sigma_max.keys()}
 
 
 def clamp_genome(ind: torch.Tensor, H: int, W: int, min_scale_splats: float, max_scale_splats: float) -> torch.Tensor:
-    """Clamp genome parameters to valid ranges."""
     ind[:,0:2] = ind[:,0:2].clamp(0.0, 1.0)
     max_side = float(max(H, W))
     min_scale_log = torch.log(torch.tensor(min_scale_splats, device=ind.device))
@@ -52,7 +48,6 @@ def clamp_genome(ind: torch.Tensor, H: int, W: int, min_scale_splats: float, max
 @torch.no_grad()
 def render_axes_angle_to_img(ind_axes_angle: torch.Tensor, Hsnap: int, Wsnap: int, 
                            k_sigma: float, device) -> np.ndarray:
-    """Render individual genome to numpy image."""
     from modules.encode import genome_to_renderer_batched
     from modules.render import render_splats_rgb_triton
     
@@ -67,7 +62,6 @@ def render_axes_angle_to_img(ind_axes_angle: torch.Tensor, Hsnap: int, Wsnap: in
 def save_frame_png(gen: int, ind_axes_angle: torch.Tensor, pad: int, prefix: str, 
                   video_dir: str, H: int, W: int, k_sigma: float, device, 
                   save_video: bool = True):
-    """Save frame to PNG file."""
     if not save_video: 
         return
     img8 = render_axes_angle_to_img(ind_axes_angle, H, W, k_sigma, device)

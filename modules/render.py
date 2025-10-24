@@ -12,7 +12,7 @@ def _preprocess_genome(genome: torch.Tensor, H: int, W: int, k_sigma: float, dev
     g = genome.to(device=device, dtype=torch.float32)
 
     maxx = float(W - 1); maxy = float(H - 1)
-    cx = (g[:, 0].clamp(0.0, 1.0) * maxx)  # centers in pixels
+    cx = (g[:, 0].clamp(0.0, 1.0) * maxx)
     cy = (g[:, 1].clamp(0.0, 1.0) * maxy)
 
     # Cholesky params
@@ -53,7 +53,7 @@ def _gpu_bin_splats_to_tiles(x0, x1, y0, y1, B:int, N:int, H:int, W:int, tile:in
     nTX = (W + tile - 1) // tile
     nTY = (H + tile - 1) // tile
     ntiles = nTX * nTY
-    S = B * N  # total splats
+    S = B * N
 
     # Tile ranges per splat
     tx0 = torch.div(x0, tile, rounding_mode='floor').clamp(0, nTX - 1)
